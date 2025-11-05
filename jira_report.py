@@ -11,13 +11,16 @@ JIRA_PROJECT = "EASCP"
 JIRA_USER = "rickard.dysenius@extrapreneur.se"
 JIRA_TOKEN = os.getenv("JIRA_TOKEN")  # export JIRA_TOKEN="..."
 HTML_FILE = "index.html"
+LOG_FILE = "update.log"
+REFRESH_INTERVAL = 600  # seconds = 10 minutes
+RETRY_INTERVAL = 60     # retry in 1 minute if Jira fetch fails
 
 # --- HTML TEMPLATE ---
 html_template = """
 <!DOCTYPE html>
 <html>
 <head>
-  <meta http-equiv="refresh" content="600">
+  <meta http-equiv="refresh" content="{{ refresh_interval }}">
   <title>Jira Report</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 40px; }
@@ -47,21 +50,28 @@ html_template = """
 </html>
 """
 
+# --- LOGGING ---
+def log(msg):
+    """Print and save timestamped log messages."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    entry = f"[{timestamp}] {msg}"
+    print(entry)
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(entry + "\n")
+
 # --- FUNCTIONS ---
 def extract_description(desc_field):
-    """Extracts plain text from Jira Cloud's ADF description field."""
+    """Extract plain text from Jira Cloud's ADF description field."""
     if not desc_field:
         return "N/A"
     try:
         text_parts = []
-
         def walk_content(content):
             for node in content:
                 if "text" in node:
                     text_parts.append(node["text"])
                 if "content" in node:
                     walk_content(node["content"])
-
         walk_content(desc_field.get("content", []))
         return " ".join(text_parts).strip() if text_parts else "N/A"
     except Exception as e:
@@ -80,7 +90,7 @@ def get_jira_issues():
     try:
         response = requests.post(url, headers=headers, json=payload, auth=(JIRA_USER, JIRA_TOKEN))
         if response.status_code != 200:
-            print("Error:", response.status_code, response.text)
+            log(f"❌ Jira API Error {response.status_code}: {response.text}")
             return []
         data = response.json()
         issues = []
@@ -96,7 +106,7 @@ def get_jira_issues():
             })
         return issues
     except Exception as e:
-        print("Exception fetching Jira issues:", e)
+        log(f"⚠️ Exception fetching Jira issues: {e}")
         return []
 
 def render_html(issues):
@@ -106,41 +116,47 @@ def render_html(issues):
         project=JIRA_PROJECT,
         issues=issues,
         updated=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        refresh_interval=REFRESH_INTERVAL
     )
     with open(HTML_FILE, "w", encoding="utf-8") as f:
         f.write(html)
-    print(f"✅ Report generated with {len(issues)} issues.")
+    log(f"✅ Report generated with {len(issues)} issues.")
 
 def git_commit_and_push():
     """Commit and push changes (HTML + script)."""
     try:
-        # Stage both the report and the script
         subprocess.run(["git", "add", HTML_FILE, "jira_report.py"], check=True)
-
-        # Check if there are changes
         diff_result = subprocess.run(["git", "diff", "--cached", "--quiet"])
         if diff_result.returncode == 0:
-            print("ℹ️ No changes to commit.")
+            log("ℹ️ No changes to commit.")
             return
-
-        # Commit and push
         msg = f"Auto-update report {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         subprocess.run(["git", "commit", "-m", msg], check=True)
         subprocess.run(["git", "push", "origin", "main"], check=True)
-        print("🚀 Report and script pushed to GitHub successfully.")
+        log("🚀 Report and script pushed to GitHub successfully.")
     except subprocess.CalledProcessError as e:
-        print(f"⚠️ Git push failed: {e}")
+        log(f"⚠️ Git push failed: {e}")
 
-
-# --- MAIN ---
+# --- MAIN LOOP ---
 def main():
-    print("Fetching Jira issues...")
-    issues = get_jira_issues()
-    if issues:
-        render_html(issues)
-        git_commit_and_push()
-    else:
-        print("No issues found — nothing to update.")
+    log("🚀 Jira report automation started.")
+    while True:
+        log("🔄 Fetching Jira issues...")
+        issues = get_jira_issues()
+
+        if issues:
+            render_html(issues)
+            git_commit_and_push()
+            log(f"💤 Sleeping for {REFRESH_INTERVAL / 60:.1f} minutes before next fetch...")
+            time.sleep(REFRESH_INTERVAL)
+        else:
+            log(f"⚠️ No issues found or fetch failed. Retrying in {RETRY_INTERVAL / 60:.1f} minute...")
+            time.sleep(RETRY_INTERVAL)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        log("🛑 Script manually stopped.")
+    except Exception as e:
+        log(f"❌ Fatal error: {e}")

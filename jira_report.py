@@ -83,7 +83,7 @@ def get_jira_issues():
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
     payload = {
         "jql": f"project = {JIRA_PROJECT} ORDER BY updated DESC",
-        "maxResults": 50,
+        "maxResults": 20,
         "fields": ["summary", "status", "description", "assignee"],
     }
 
